@@ -1,0 +1,6 @@
+# Dependencias para las pruebas E2E de QA con Playwright.
+# Instalar con:
+#   pip install -r requirements.txt
+#   playwright install
+pytest-playwright==0.9.0
+python-dotenv==1.2.3

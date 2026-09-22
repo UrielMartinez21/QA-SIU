@@ -1,0 +1,17 @@
+# Evidencia de pruebas (se regenera en cada corrida)
+test-results/
+
+# Sesion guardada del login (contiene cookies, es sensible)
+auth.json
+
+# Variables de entorno con credenciales reales
+.env
+
+# Entorno virtual
+venv/
+.venv/
+
+# Cache de Python y pytest
+__pycache__/
+*.pyc
+.pytest_cache/
