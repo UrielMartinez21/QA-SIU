@@ -26,10 +26,11 @@ QA/
 │   └── notas_qa_testing.md        # Estrategia de testing del proyecto
 └── src/
     ├── conftest.py                # Fixtures compartidas (base_url, credentials, sesión)
-    ├── tests/<modulo>/            # Tests E2E por módulo
-    │   └── finanzas/test_carga_contable.py
-    └── fixtures/<modulo>/         # Datos de prueba (Excel), por módulo
-        └── finanzas/README.md     # Qué Excel colocar
+    ├── helpers/<module>/            # Tests E2E por módulo
+    ├── tests/<module>/            # Tests E2E por módulo
+    │   └── finance/test_carga_contable.py
+    └── fixtures/<module>/         # Datos de prueba (Excel), por módulo
+        └── finance/README.md     # Qué Excel colocar
 ```
 
 La evidencia de fallos (screenshot/video/trace) se genera en `test-results/` (ignorada por git).
