@@ -33,8 +33,12 @@ def _login(page: Page, base_url: str, credentials: dict) -> None:
     page.wait_for_load_state("networkidle")
 
 
-def test_pantalla_carga_contable_carga_bien(page: Page, base_url: str, credentials: dict):
+def test_pantalla_carga_contable_carga_bien(page: Page, base_url: str, credentials: dict, reporte):
     """La pantalla de carga contable se muestra correctamente tras el login."""
+    # Registrar insumos/datos de la prueba (opcional). Los pasos se capturan solos.
+    reporte.dato("Matrícula", credentials["user"])
+    reporte.dato("Pantalla", "finanzas/accounting-file-upload")
+
     _login(page, base_url, credentials)
 
     # Margen amplio: tras el login la pagina puede tardar en renderizar.

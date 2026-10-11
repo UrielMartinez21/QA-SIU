@@ -1,5 +1,6 @@
 # Evidencia de pruebas (se regenera en cada corrida)
 test-results/
+reportes/
 
 # Sesion guardada del login (contiene cookies, es sensible)
 auth.json
