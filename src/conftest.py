@@ -17,6 +17,7 @@ prueba ejecutada (pase o falle):
 """
 
 import datetime as _dt
+import html as _html
 import os
 import shutil
 from pathlib import Path
@@ -40,6 +41,11 @@ _RUN_DIR = _PROJECT_ROOT / "reportes" / _RUN_STAMP
 # ni perder el trace. De aqui movemos el trace.zip al lado del .md cuando falla.
 _PW_OUTPUT_DIR = _RUN_DIR / "_playwright_artifacts"
 
+# Acumula el resumen de cada prueba de la corrida para construir el index.html
+# navegable al terminar la sesion (ver _write_html_index). Cada entrada es un
+# dict con: name, passed, duration, ambiente, navegador, md, png, trace.
+_RUN_RESULTS: list[dict] = []
+
 
 def pytest_configure(config):
     """Fija la salida de pytest-playwright a una ruta absoluta de la corrida.
@@ -51,23 +57,44 @@ def pytest_configure(config):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    """Limpia la carpeta de artefactos del plugin al terminar la corrida.
+    """Cierra la corrida: genera el index.html y limpia los artefactos del plugin.
 
-    Los traces de los tests fallidos ya se movieron junto a su .md, asi que esta
-    carpeta temporal (`_playwright_artifacts/`) ya no aporta y se elimina para
-    dejar `reportes/<corrida>/` limpia (solo .md, .png y _trace.zip).
+    1. Escribe un `index.html` navegable con el resumen de todas las pruebas de
+       la corrida (enlaces al .md, a la captura y al trace de cada una).
+    2. Borra la carpeta temporal `_playwright_artifacts/` (los traces de los
+       tests fallidos ya se movieron junto a su .md), dejando
+       `reportes/<corrida>/` limpia (solo index.html, .md, .png y _trace.zip).
     """
+    # 1. Indice navegable de la corrida (solo si hubo pruebas con evidencia).
+    if _RUN_RESULTS:
+        try:
+            _write_html_index()
+        except Exception:
+            # El index es un extra: si algo falla no debe tumbar la corrida.
+            pass
+
+    # 2. Limpieza de la carpeta temporal del plugin.
     if _PW_OUTPUT_DIR.exists():
         shutil.rmtree(_PW_OUTPUT_DIR, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
-def base_url() -> str:
+def base_url(request) -> str:
     """URL base del ambiente donde corren las pruebas.
 
-    Se define con la variable de entorno E2E_BASE_URL. Por defecto usa local.
-    Tambien se puede sobreescribir al ejecutar con el flag --base-url de pytest.
+    Prioridad (de mayor a menor):
+      1. Flag de linea de comandos --base-url (lo registra pytest-playwright).
+      2. Variable de entorno E2E_BASE_URL (archivo .env).
+      3. Valor por defecto local (http://localhost:8000).
+
+    Asi el flag de consola SIEMPRE gana sobre el .env, que es lo que documenta
+    el README. Ejemplo:
+        python -m pytest --base-url https://siu-migr.scalahed.com:8023
     """
+    # pytest-playwright registra la opcion --base-url; si no se paso, es None.
+    cli_base_url = request.config.getoption("--base-url", default=None)
+    if cli_base_url:
+        return cli_base_url
     return os.environ.get("E2E_BASE_URL", "http://localhost:8000")
 
 
@@ -310,6 +337,226 @@ def _move_trace_if_failed(item, call_report) -> str | None:
     return dest_name
 
 
+def _esc(valor) -> str:
+    """Escapa texto para insertarlo de forma segura en cualquier HTML generado."""
+    return _html.escape(str(valor), quote=True)
+
+
+# CSS compartido entre el index.html y cada reporte .html de la corrida.
+# Se centraliza aqui para que ambos tengan la misma identidad visual y para no
+# duplicar estilos. Las llaves { } van dobladas {{ }} porque se inserta dentro
+# de f-strings.
+_SHARED_CSS = """
+  :root {
+    --bg: #eef1f6; --panel: #ffffff; --ink: #1b2330; --muted: #5b6672;
+    --line: #e4e8ef; --line-soft: #eef1f5; --brand: #4f46e5; --brand-ink: #e0e7ff;
+    --ok-bg: #dcfce7; --ok-ink: #15803d; --fail-bg: #fee2e2; --fail-ink: #b91c1c;
+    --link: #4338ca; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+    margin: 0; padding: 0 0 3rem; background: var(--bg); color: var(--ink);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 1.5rem; }
+  header.hero {
+    background: linear-gradient(120deg, #4f46e5 0%, #7c3aed 55%, #a855f7 100%);
+    color: #fff; padding: 2rem 0 2.25rem; margin-bottom: -1.25rem;
+    box-shadow: var(--shadow);
+  }
+  header.hero .wrap { display: flex; flex-direction: column; gap: .35rem; }
+  header.hero .eyebrow {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .12em;
+    color: var(--brand-ink); font-weight: 600;
+  }
+  header.hero h1 { font-size: 1.55rem; margin: 0; font-weight: 700; }
+  header.hero .meta { color: #ddd6fe; font-size: .85rem; margin-top: .15rem; }
+  header.hero .meta b { color: #fff; font-weight: 600; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 1.25rem 1.4rem; margin-top: 1.25rem;
+  }
+  .panel h2 {
+    font-size: .95rem; margin: 0 0 .9rem; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted);
+  }
+  .cards { display: flex; flex-wrap: wrap; gap: 1rem; }
+  .card {
+    flex: 1 1 140px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 1.1rem 1.25rem; box-shadow: var(--shadow);
+  }
+  .card .n { font-size: 1.9rem; font-weight: 800; line-height: 1; }
+  .card .l {
+    font-size: .74rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .05em; margin-top: .4rem; font-weight: 600;
+  }
+  .card.ok .n { color: var(--ok-ink); }
+  .card.fail .n { color: var(--fail-ink); }
+  .card.brand .n { color: var(--brand); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left; padding: .75rem .85rem; border-bottom: 1px solid var(--line-soft);
+    font-size: .9rem; vertical-align: top;
+  }
+  th {
+    font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); font-weight: 700;
+  }
+  tbody tr { transition: background .12s ease; }
+  tbody tr:hover { background: #f7f8fc; }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+  .kv td:first-child { color: var(--muted); font-weight: 600; width: 34%; }
+  .badge {
+    display: inline-block; padding: .2rem .65rem; border-radius: 999px;
+    font-size: .75rem; font-weight: 700; letter-spacing: .02em;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .badge.fail { background: var(--fail-bg); color: var(--fail-ink); }
+  a { color: var(--link); text-decoration: none; font-weight: 500; }
+  a:hover { text-decoration: underline; }
+  .links a { margin-right: .1rem; }
+  .sep { color: var(--line); margin: 0 .35rem; }
+  ol, ul { margin: 0; padding-left: 1.25rem; }
+  li { margin: .2rem 0; }
+  .shot { max-width: 100%; border: 1px solid var(--line); border-radius: 10px; margin-top: .5rem; }
+  pre {
+    background: #0f172a; color: #e2e8f0; padding: 1rem; border-radius: 10px;
+    overflow-x: auto; font-size: .82rem; line-height: 1.45;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: .5rem 0 0;
+  }
+  .back { display: inline-block; margin-top: 1.25rem; font-size: .85rem; }
+  .empty { color: var(--muted); font-style: italic; }
+"""
+
+
+def _html_page(title: str, body: str) -> str:
+    """Envuelve un cuerpo HTML en un documento completo con el CSS compartido."""
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="es">\n<head>\n'
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{_esc(title)}</title>\n"
+        f"<style>{_SHARED_CSS}</style>\n"
+        "</head>\n<body>\n"
+        f"{body}\n"
+        "</body>\n</html>\n"
+    )
+
+
+def _write_report_html(item, report, rec: "_Recorder", screenshot_rel, tiempo_carga,
+                       base_url_val, browser_val, que_se_probo, archivo_prueba,
+                       estado, ahora, trace_rel=None) -> str:
+    """Escribe un reporte .html formateado (legible en navegador) para una prueba.
+
+    Convierte la misma informacion del .md a una pagina con estilo: encabezado
+    con badge de estado, tablas de metadatos/metricas, pasos, captura embebida y
+    el error (si fallo) en un bloque legible. Devuelve el nombre del archivo.
+    """
+    passed = report.passed
+    estado_cls = "ok" if passed else "fail"
+    estado_txt = "PASÓ" if passed else "FALLÓ"
+
+    b: list[str] = []
+    b.append('<header class="hero"><div class="wrap">')
+    b.append('<span class="eyebrow">Reporte de prueba E2E</span>')
+    b.append(f"<h1>{_esc(item.name)}</h1>")
+    b.append(
+        f'<div class="meta"><span class="badge {estado_cls}">{estado_txt}</span>'
+        f" &nbsp; <b>{_esc(ahora)}</b> · {_esc(archivo_prueba)}</div>"
+    )
+    b.append("</div></header>")
+
+    b.append('<div class="wrap">')
+
+    # --- Metadatos ---
+    b.append('<div class="panel"><h2>Datos de la prueba</h2>')
+    b.append('<table class="kv"><tbody>')
+    b.append(f"<tr><td>Resultado</td><td>{estado}</td></tr>")
+    b.append(f"<tr><td>Fecha/hora</td><td>{_esc(ahora)}</td></tr>")
+    b.append(f"<tr><td>Ambiente</td><td>{_esc(base_url_val)}</td></tr>")
+    b.append(f"<tr><td>Navegador</td><td>{_esc(browser_val)}</td></tr>")
+    b.append(f"<tr><td>Archivo de prueba</td><td>{_esc(archivo_prueba)}</td></tr>")
+    b.append(f"<tr><td>URL final</td><td>{_esc(rec.final_url)}</td></tr>")
+    b.append("</tbody></table></div>")
+
+    # --- Que se probo ---
+    b.append('<div class="panel"><h2>Qué se probó</h2>')
+    b.append(f"<p>{_esc(que_se_probo).replace(chr(10), '<br>')}</p></div>")
+
+    # --- Insumos ---
+    if rec.insumos or rec.datos or rec.descargas:
+        b.append('<div class="panel"><h2>Insumos utilizados</h2><ul>')
+        for nombre, valor in rec.insumos:
+            b.append(f"<li>{_esc(nombre)}: {_esc(valor)}</li>")
+        for nombre, valor in rec.datos:
+            b.append(f"<li>{_esc(nombre)}: {_esc(valor)}</li>")
+        for nombre in rec.descargas:
+            b.append(f"<li>Archivo descargado: {_esc(nombre)}</li>")
+        b.append("</ul></div>")
+
+    # --- Pasos ---
+    b.append('<div class="panel"><h2>Pasos ejecutados</h2>')
+    if rec.pasos:
+        b.append("<ol>")
+        for paso in rec.pasos:
+            b.append(f"<li>{_esc(paso)}</li>")
+        b.append("</ol>")
+    else:
+        b.append('<p class="empty">No se registraron navegaciones automáticas.</p>')
+    b.append("</div>")
+
+    # --- Metricas ---
+    b.append('<div class="panel"><h2>Métricas</h2><table class="kv"><tbody>')
+    b.append(f"<tr><td>Duración total</td><td>{report.duration:.2f} s</td></tr>")
+    b.append(f"<tr><td>Tiempo de carga de página</td><td>{_esc(tiempo_carga)}</td></tr>")
+    b.append(f"<tr><td>Código HTTP principal</td><td>{_esc(rec.main_status)}</td></tr>")
+    b.append(
+        f"<tr><td>Peticiones de red</td><td>{rec.request_count} "
+        f"({rec.response_errors} con error)</td></tr>"
+    )
+    b.append(f"<tr><td>Errores de consola JS</td><td>{len(rec.console_errors)}</td></tr>")
+    b.append("</tbody></table></div>")
+
+    # --- Resultado / error ---
+    b.append('<div class="panel"><h2>Resultado obtenido</h2>')
+    if passed:
+        b.append("<p>La prueba terminó correctamente (passed).</p>")
+    else:
+        b.append("<p>La prueba falló (failed). Detalle del error:</p>")
+        b.append(f"<pre>{_esc(report.longrepr)}</pre>")
+    b.append("</div>")
+
+    # --- Errores de consola ---
+    if rec.console_errors:
+        b.append('<div class="panel"><h2>Errores de consola detectados</h2><ul>')
+        for err in rec.console_errors:
+            b.append(f"<li>{_esc(err)}</li>")
+        b.append("</ul></div>")
+
+    # --- Evidencia ---
+    b.append('<div class="panel"><h2>Evidencia</h2>')
+    if screenshot_rel:
+        b.append(f'<img class="shot" src="{_esc(screenshot_rel)}" alt="captura de la prueba">')
+    else:
+        b.append('<p class="empty">No se pudo capturar screenshot.</p>')
+    if trace_rel:
+        b.append(
+            f"<p>Trace de Playwright: <code>{_esc(trace_rel)}</code><br>"
+            f"Para abrirlo: <code>playwright show-trace reportes/{_esc(_RUN_STAMP)}/{_esc(trace_rel)}</code></p>"
+        )
+    b.append("</div>")
+
+    b.append('<a class="back" href="index.html">← Volver al índice de la corrida</a>')
+    b.append("</div>")
+
+    out_name = f"{item.name}.html"
+    (_RUN_DIR / out_name).write_text(_html_page(f"Reporte · {item.name}", "\n".join(b)), encoding="utf-8")
+    return out_name
+
+
 def _write_report(item, report, rec: "_Recorder", screenshot_rel, tiempo_carga, trace_rel=None) -> None:
     """Escribe el archivo .md de evidencia para una prueba."""
     passed = report.passed
@@ -415,3 +662,106 @@ def _write_report(item, report, rec: "_Recorder", screenshot_rel, tiempo_carga, 
 
     out_file = _RUN_DIR / f"{item.name}.md"
     out_file.write_text("\n".join(lines), encoding="utf-8")
+
+    # Version HTML del mismo reporte (legible en navegador, no "como codigo").
+    # Es la que enlaza el index; el .md se conserva para leer en editor/GitHub.
+    html_name = _write_report_html(
+        item, report, rec, screenshot_rel, tiempo_carga,
+        base_url_val, browser_val, que_se_probo, archivo_prueba,
+        estado, ahora, trace_rel,
+    )
+
+    # Registrar la prueba para el index.html navegable de la corrida.
+    _RUN_RESULTS.append(
+        {
+            "name": item.name,
+            "passed": passed,
+            "duration": report.duration,
+            "ambiente": str(base_url_val),
+            "navegador": browser_val,
+            "html": html_name,
+            "md": out_file.name,
+            "png": screenshot_rel,
+            "trace": trace_rel,
+        }
+    )
+
+# ===========================================================================
+# INDICE HTML NAVEGABLE DE LA CORRIDA
+# ===========================================================================
+
+
+def _write_html_index() -> None:
+    """Genera `reportes/<corrida>/index.html` con el resumen de la corrida.
+
+    Es una vista navegable (una tabla) de todas las pruebas ejecutadas, con
+    enlaces a su reporte .md, su captura .png y su trace .zip cuando existen.
+    Da visibilidad rapida: cuantas pasaron/fallaron, cuanto duraron y el acceso
+    directo a la evidencia de cada una, sin abrir los .md uno por uno.
+    """
+    total = len(_RUN_RESULTS)
+    pasaron = sum(1 for r in _RUN_RESULTS if r["passed"])
+    fallaron = total - pasaron
+    duracion_total = sum(r["duration"] for r in _RUN_RESULTS)
+
+    # Ambiente: normalmente es el mismo para toda la corrida; mostramos el
+    # primero no vacio como referencia.
+    ambiente = next((r["ambiente"] for r in _RUN_RESULTS if r["ambiente"] not in ("", "N/D")), "N/D")
+
+    filas: list[str] = []
+    for r in _RUN_RESULTS:
+        estado_cls = "ok" if r["passed"] else "fail"
+        estado_txt = "PASÓ" if r["passed"] else "FALLÓ"
+
+        # El enlace principal apunta al reporte .html (legible). El .md queda
+        # como enlace secundario. Captura y trace solo si existen.
+        reporte_href = r.get("html") or r["md"]
+        enlaces: list[str] = [f'<a href="{_esc(reporte_href)}">Ver reporte</a>']
+        if r.get("md"):
+            enlaces.append(f'<a href="{_esc(r["md"])}">MD</a>')
+        if r["png"]:
+            enlaces.append(f'<a href="{_esc(r["png"])}">Captura</a>')
+        if r["trace"]:
+            enlaces.append(f'<a href="{_esc(r["trace"])}">Trace</a>')
+        evidencia = '<span class="sep">·</span>'.join(enlaces)
+
+        filas.append(
+            '<tr>'
+            f'<td><span class="badge {estado_cls}">{estado_txt}</span></td>'
+            f'<td class="name">{_esc(r["name"])}</td>'
+            f'<td>{r["duration"]:.2f} s</td>'
+            f'<td>{_esc(r["navegador"])}</td>'
+            f'<td class="links">{evidencia}</td>'
+            "</tr>"
+        )
+
+    generado = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tasa = f"{(pasaron / total * 100):.0f}%" if total else "—"
+
+    body = f"""<header class="hero"><div class="wrap">
+    <span class="eyebrow">Resumen de corrida E2E</span>
+    <h1>Reporte de pruebas</h1>
+    <div class="meta">Corrida <b>{_esc(_RUN_STAMP)}</b> · Ambiente <b>{_esc(ambiente)}</b> · Generado {_esc(generado)}</div>
+  </div></header>
+  <div class="wrap">
+    <div class="cards">
+      <div class="card brand"><div class="n">{total}</div><div class="l">Pruebas</div></div>
+      <div class="card ok"><div class="n">{pasaron}</div><div class="l">Pasaron</div></div>
+      <div class="card fail"><div class="n">{fallaron}</div><div class="l">Fallaron</div></div>
+      <div class="card"><div class="n">{tasa}</div><div class="l">Tasa de éxito</div></div>
+      <div class="card"><div class="n">{duracion_total:.1f} s</div><div class="l">Duración</div></div>
+    </div>
+    <div class="panel">
+      <h2>Detalle de pruebas</h2>
+      <table>
+        <thead>
+          <tr><th>Resultado</th><th>Prueba</th><th>Duración</th><th>Navegador</th><th>Evidencia</th></tr>
+        </thead>
+        <tbody>
+          {"".join(filas)}
+        </tbody>
+      </table>
+    </div>
+  </div>"""
+
+    (_RUN_DIR / "index.html").write_text(_html_page(f"Reporte de corrida · {_RUN_STAMP}", body), encoding="utf-8")
